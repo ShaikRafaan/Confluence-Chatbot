@@ -38,17 +38,6 @@ def api(base_url: str , path:str) -> str:
 
 #Set up session via auth
 def build_session(user: str , token: str) -> requests.Session:
-    user = (user or "").strip()
-    token = (token or "").strip()
-
-    for field_name, value in {"user_email": user, "api_key": token}.items():
-        for char in value:
-            if ord(char) > 255:
-                raise ValueError(
-                    f"{field_name} contains a character that cannot be used in "
-                    f"Confluence Basic Auth: U+{ord(char):04X}"
-                )
-
     session=requests.Session()
     session.auth=HTTPBasicAuth(user,token)
     session.headers.update({"Accept":"application/json"})

@@ -161,5 +161,3 @@ if __name__ == "__main__":
         json.dump(vectors, f, indent=2)
 
     print(" Saved to vectors.json")
-
-

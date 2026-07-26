@@ -128,5 +128,3 @@ if __name__ == "__main__":
     
     clean_export(sys.argv[1],sys.argv[2])
     
-
-

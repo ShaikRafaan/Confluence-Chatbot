@@ -102,6 +102,8 @@ def chunk_data(clean_documents: List[Dict],user_id: str,connection_id: str = "de
     
     print("Chunking complete")
 
+    print(all_chunks)
+
     return all_chunks
     
                
@@ -163,10 +165,3 @@ if __name__ == "__main__":
         input_path=input_json,
         output_path=output_json
     )
-
-
-
-
-
-
-

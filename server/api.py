@@ -10,13 +10,23 @@ import random
 import time
 from uuid import uuid4
 from urllib.parse import urlparse
-from typing import Optional
+from typing import Optional, List
 from server.ingestion import run_pipeline
+from server.redis_service import (
+    create_new_session,
+    save_message,
+    get_session_history,
+    get_user_sessions,
+    clear_session_history,
+    delete_session,
+    update_session_accessed
+)
+from server.models import SessionMetadata, ClearHistoryRequest
 load_dotenv()
 #Config
 NVIDIA_API_KEY=os.getenv("NVIDIA_API_KEY")
-EMBED_MODEL="nvidia/nv-embedqa-e5-v5"
-LLM_MODEL="meta/llama-3.1-70b-instruct"
+EMBED_MODEL=os.getenv("EMBEDDING_MODEL")
+LLM_MODEL=os.getenv("LLM_MODEL")
 MAX_EMBED_RETRIES = 4
 
 if not NVIDIA_API_KEY:
@@ -56,6 +66,12 @@ class ChatRequest(BaseModel):
     user_id: str
     query: str
     session_id: Optional[str] = None
+
+class ChatResponse(BaseModel):
+    user_id: str
+    session_id: str
+    query: str
+    answer: str
 
 class IngestRequest(BaseModel):
     user_id: str
@@ -135,7 +151,7 @@ def embed_query(query: str):
 
     raise last_error
 
-def retrieve_chunks(user_id: str, query: str, top_k: int = 3):
+def retrieve_chunks(user_id: str, query: str, top_k: int = 10):
     collection_name = f"user_{user_id}_{embedding_collection_suffix()}"
     collection = client_db.get_or_create_collection(collection_name)
 
@@ -154,20 +170,28 @@ def retrieve_chunks(user_id: str, query: str, top_k: int = 3):
 
     return documents[0] or [], metadatas[0] or []
 
-def build_prompt(query: str, documents: list):
+def build_prompt(query: str, documents: list, history: list = None):
     context="\n\n".join(documents)
+    
+    # Build conversation history string if available
+    history_str = ""
+    if history and len(history) > 0:
+        history_str = "\n\nPrevious conversation:\n"
+        for msg in history[-3:]:  # Include last 3 messages for context
+            role = msg.get("role", "user").capitalize()
+            content = msg.get("content", "")
+            history_str += f"{role}: {content}\n"
 
     prompt=f"""
-
-    You are an AI assistant for a Customer Support Intelligence Platform.
+    You are an AI assistant for a Confluence.
 
     Answer ONLY using the context below.
     If the answer is not present, say "I don't know".
 
     Context:
     {context}
-
-    Question:
+    {history_str}
+    Current Question:
     {query}
 
     Answer:
@@ -175,14 +199,25 @@ def build_prompt(query: str, documents: list):
 
     return prompt
 def generate_answer(prompt: str, history: list = None):
-    messages=[{"role":"system","content":"You answer based only on provided context."}]
-    if history:
-        messages.extend(history)
-    messages.append({"role":"user","content":prompt})
+    messages = [{"role": "system", "content": "You are a helpful assistant. Answer based on the provided context and conversation history."}]
+    
+    # Add previous conversation messages to provide context
+    if history and len(history) > 0:
+        # Include last 3 messages for context (to avoid token limits)
+        for msg in history[-3:]:
+            messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", "")
+            })
+    
+    # Add the current prompt
+    messages.append({"role": "user", "content": prompt})
+    
     try:
-        response=get_nvidia_client().chat.completions.create(
+        response = get_nvidia_client().chat.completions.create(
             model=LLM_MODEL,
-            messages=messages, temperature=0.2
+            messages=messages, 
+            temperature=0.2
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -191,6 +226,7 @@ def generate_answer(prompt: str, history: list = None):
 
 def rag_pipeline(user_id: str, query: str, history: list = None):
     print(f"Query: {query}")
+    print(f"History length: {len(history) if history else 0}")
 
     try:
         documents, metadatas = retrieve_chunks(user_id, query)
@@ -201,9 +237,10 @@ def rag_pipeline(user_id: str, query: str, history: list = None):
     if not documents:
         return "No relevant data found. Please ingest data first."
 
-    prompt=build_prompt(query,documents)
+    prompt = build_prompt(query, documents, history)
+    print(f"Prompt: {prompt}")
 
-    answer=generate_answer(prompt, history)
+    answer = generate_answer(prompt, history)
 
     print(f"Answer: \n\n {answer}")
 
@@ -220,23 +257,78 @@ def root():
 def health():
     return {"status": "ok"}
 
-@app.post("/chat")
-def chat(req: ChatRequest):
-    session_id = req.session_id
-    if not session_id:
-        session_id = str(uuid4())
+@app.post("/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest):
+    """Chat endpoint with Redis-backed history."""
+    # Create or use existing session
+    if req.session_id:
+        session_id = req.session_id
+        await update_session_accessed(session_id)
+    else:
+        session_id = await create_new_session(req.user_id)
 
-    # Passing empty history since Redis is disabled for testing
-    history = []
+    print(f"Session ID: {session_id}")
+    
+    # Retrieve chat history from Redis
+    messages = await get_session_history(session_id)
+    print(f"Retrieved {len(messages)} messages from Redis")
+    
+    # Convert to format expected by LLM
+    history = [{"role": msg.role, "content": msg.content} for msg in messages]
+    print(f"History for LLM: {len(history)} messages")
 
+    # Run RAG pipeline with context
     answer = rag_pipeline(req.user_id, req.query, history)
 
-    return{
-        "user_id":req.user_id,
+    # Save both user query and assistant response to Redis
+    print(f"Saving user message and response to session {session_id}")
+    await save_message(session_id, req.user_id, "user", req.query)
+    await save_message(session_id, req.user_id, "assistant", answer)
+
+    return ChatResponse(
+        user_id=req.user_id,
+        session_id=session_id,
+        query=req.query,
+        answer=answer
+    )
+
+
+@app.get("/sessions/{user_id}", response_model=List[SessionMetadata])
+async def get_sessions(user_id: str):
+    """Get all sessions for a user."""
+    sessions = await get_user_sessions(user_id)
+    return sessions
+
+
+@app.get("/sessions/{user_id}/{session_id}")
+async def get_session(user_id: str, session_id: str):
+    """Get history for a specific session."""
+    messages = await get_session_history(session_id)
+    return {
+        "user_id": user_id,
         "session_id": session_id,
-        "query":req.query,
-        "answer": answer
+        "messages": [msg.model_dump() for msg in messages]
     }
+
+
+@app.delete("/sessions/{user_id}/{session_id}")
+async def delete_chat_session(user_id: str, session_id: str):
+    """Delete a chat session."""
+    success = await delete_session(user_id, session_id)
+    if success:
+        return {"message": f"Session {session_id} deleted"}
+    else:
+        raise HTTPException(status_code=400, detail="Failed to delete session")
+
+
+@app.post("/sessions/{session_id}/clear")
+async def clear_chat_history(session_id: str):
+    """Clear all messages from a session."""
+    success = await clear_session_history(session_id)
+    if success:
+        return {"message": f"Session {session_id} history cleared"}
+    else:
+        raise HTTPException(status_code=400, detail="Failed to clear history")
 
 @app.post("/ingest")
 def ingest(req: IngestRequest, background_tasks: BackgroundTasks):
@@ -252,5 +344,3 @@ def ingest(req: IngestRequest, background_tasks: BackgroundTasks):
             title=req.title.strip() if req.title else None
         )
     return{"message":"Ingestion Started","user_id":req.user_id}
-
-
