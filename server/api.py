@@ -2,16 +2,12 @@ from pydantic import BaseModel
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import chromadb
-from openai import OpenAI
 from dotenv import load_dotenv
 import os
-import json
-import random
-import time
-from uuid import uuid4
 from urllib.parse import urlparse
 from typing import Optional, List
 from server.ingestion import run_pipeline
+from server.config import EMBED_MODEL, LLM_MODEL, embedding_collection_suffix, get_nvidia_client
 from server.redis_service import (
     create_new_session,
     save_message,
@@ -23,30 +19,11 @@ from server.redis_service import (
 )
 from server.models import SessionMetadata, ClearHistoryRequest
 load_dotenv()
-#Config
-NVIDIA_API_KEY=os.getenv("NVIDIA_API_KEY")
-EMBED_MODEL=os.getenv("EMBEDDING_MODEL")
-LLM_MODEL=os.getenv("LLM_MODEL")
-MAX_EMBED_RETRIES = 4
+
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
 if not NVIDIA_API_KEY:
     raise RuntimeError("NVIDIA_API_KEY is not set")
-
-client_nvidia = None
-
-
-def get_nvidia_client():
-    global client_nvidia
-    if not NVIDIA_API_KEY:
-        raise RuntimeError("NVIDIA_API_KEY is not set")
-
-    if client_nvidia is None:
-        client_nvidia=OpenAI(
-            base_url="https://integrate.api.nvidia.com/v1",
-            api_key=NVIDIA_API_KEY
-        )
-    return client_nvidia
-
 
 client_db = chromadb.PersistentClient(path="./chroma_db")
 
@@ -82,9 +59,6 @@ class IngestRequest(BaseModel):
     title: Optional[str] = None
 
 #Helper Functions
-
-def embedding_collection_suffix() -> str:
-    return "nvidia_e5_v5"
 
 def _first_non_latin1(value: str):
     for char in value:
@@ -126,30 +100,8 @@ def validate_ingest_request(req: IngestRequest):
         )
 
 def embed_query(query: str):
-    last_error = None
-
-    for attempt in range(1, MAX_EMBED_RETRIES + 1):
-        try:
-            response=get_nvidia_client().embeddings.create(
-                model=EMBED_MODEL,
-                input=[query],
-                encoding_format="float",
-                extra_body={"truncate": "END", "input_type": "query"}
-            )
-            return response.data[0].embedding
-        except Exception as exc:
-            last_error = exc
-            if attempt == MAX_EMBED_RETRIES:
-                break
-
-            wait_seconds = min(2 ** (attempt - 1), 8) + random.uniform(0, 0.5)
-            print(
-                f"Query embedding failed on attempt {attempt}/{MAX_EMBED_RETRIES}; "
-                f"retrying in {wait_seconds:.1f}s ({exc})"
-            )
-            time.sleep(wait_seconds)
-
-    raise last_error
+    from server.config import embed_with_retries
+    return embed_with_retries(query, input_type="query")
 
 def retrieve_chunks(user_id: str, query: str, top_k: int = 10):
     collection_name = f"user_{user_id}_{embedding_collection_suffix()}"
@@ -171,26 +123,17 @@ def retrieve_chunks(user_id: str, query: str, top_k: int = 10):
     return documents[0] or [], metadatas[0] or []
 
 def build_prompt(query: str, documents: list, history: list = None):
-    context="\n\n".join(documents)
-    
-    # Build conversation history string if available
-    history_str = ""
-    if history and len(history) > 0:
-        history_str = "\n\nPrevious conversation:\n"
-        for msg in history[-3:]:  # Include last 3 messages for context
-            role = msg.get("role", "user").capitalize()
-            content = msg.get("content", "")
-            history_str += f"{role}: {content}\n"
+    context = "\n\n".join(documents)
 
-    prompt=f"""
-    You are an AI assistant for a Confluence.
+    prompt = f"""
+    You are an AI assistant for a Confluence knowledge base.
 
     Answer ONLY using the context below.
     If the answer is not present, say "I don't know".
 
     Context:
     {context}
-    {history_str}
+
     Current Question:
     {query}
 
@@ -199,25 +142,24 @@ def build_prompt(query: str, documents: list, history: list = None):
 
     return prompt
 def generate_answer(prompt: str, history: list = None):
-    messages = [{"role": "system", "content": "You are a helpful assistant. Answer based on the provided context and conversation history."}]
-    
-    # Add previous conversation messages to provide context
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant. Answer based on the provided context."}
+    ]
+
     if history and len(history) > 0:
-        # Include last 3 messages for context (to avoid token limits)
         for msg in history[-3:]:
             messages.append({
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", "")
             })
-    
-    # Add the current prompt
+
     messages.append({"role": "user", "content": prompt})
-    
+
     try:
         response = get_nvidia_client().chat.completions.create(
             model=LLM_MODEL,
-            messages=messages, 
-            temperature=0.2
+            messages=messages,
+            temperature=0.2,
         )
         return response.choices[0].message.content
     except Exception as e:

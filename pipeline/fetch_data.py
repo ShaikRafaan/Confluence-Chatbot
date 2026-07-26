@@ -121,23 +121,30 @@ def paginate(session: requests.Session, url: str, param: Dict= None,
 
 #     return paginate(session,api(confluence_url,"/rest/api/content/search"),params)
 
+def _escape_cql_literal(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def fetch_filtered(session, confluence_url, label=None, title=None):
     label = (label or "").strip() or None
     title = (title or "").strip() or None
 
-    if title and label:
+    escaped_title = _escape_cql_literal(title) if title else None
+    escaped_label = _escape_cql_literal(label) if label else None
+
+    if escaped_title and escaped_label:
         params = {
-            "cql": f'type="page" AND title ~ "{title}" AND label = "{label}"',
+            "cql": f'type="page" AND title ~ "{escaped_title}" AND label = "{escaped_label}"',
             "expand": EXPAND
         }
-    elif title:
+    elif escaped_title:
         params = {
-            "cql": f'type="page" AND title ~ "{title}"',
+            "cql": f'type="page" AND title ~ "{escaped_title}"',
             "expand": EXPAND
         }
-    elif label:
+    elif escaped_label:
         params = {
-            "cql": f'type="page" AND label = "{label}"',
+            "cql": f'type="page" AND label = "{escaped_label}"',
             "expand": EXPAND
         }
     else:
@@ -383,70 +390,52 @@ def save_last_sync():
 
 def fetch_data(api_key: str, user: str, confluence_url: Optional[str] = None, label: Optional[str] = None,
                title: Optional[str] = None) -> Dict:
-    confluence_url= confluence_url or CONFLUENCE_URL
-    
-    session = build_session(user,api_key)
+    confluence_url = confluence_url or CONFLUENCE_URL
+
+    session = build_session(user, api_key)
 
     if not label and not title:
         pages_raw = fetch_all(session, confluence_url)
     else:
         pages_raw = fetch_filtered(session, confluence_url, label, title)
-    
+
     print(f"Pages found: {len(pages_raw)}")
 
     all_pages_raw = list(pages_raw)
-
     seen_ids = {p["id"] for p in pages_raw}
 
-    
     for page in list(pages_raw):
-            children = fetch_children_recursive(session, confluence_url, page["id"])
+        children = fetch_children_recursive(session, confluence_url, page["id"])
+        for child in children:
+            if child["id"] not in seen_ids:
+                all_pages_raw.append(child)
+                seen_ids.add(child["id"])
 
-            for child in children:
-                if child["id"] not in seen_ids:
-                    all_pages_raw.append(child)
-                    seen_ids.add(child["id"])
-    print(f"Total pages including children: len{all_pages_raw}")
+    print(f"Total pages including children: {len(all_pages_raw)}")
 
-    pages_out=[]
+    pages_out = []
 
     for raw in all_pages_raw:
-        pages_out.append({
-            
-            "id": raw["id"],
-            "title": raw["title"],
-            "status": raw.get("status"),
-            "created_by": raw.get("history", {}).get("createdBy", {}).get("displayName"),
-            "updated_at": raw.get("version", {}).get("when"),
-            "updated_by": raw.get("version", {}).get("by", {}).get("displayName"),
-            "version_number": raw.get("version", {}).get("number"),
-            
-            "labels": [
-                    l["name"]
-                    for l in raw.get("metadata", {}).get("labels", {}).get("results", [])
-                ],
+        page = page_format(raw)
+        raw_attachments = fetch_attachments(session, confluence_url, page["id"])
+        processed_attachments = []
 
-            "ancestors": [
-                    {"id": a["id"], "title": a["title"]}
-                    for a in raw.get("ancestors", [])
-                ],
+        for raw_attachment in raw_attachments:
+            att = process_attachment(session, confluence_url, page["id"], raw_attachment)
+            if att:
+                processed_attachments.append(att)
 
-            "url": raw.get("_links", {}).get("webui", ""),
-            "body_storage": raw.get("body", {}).get("storage", {}).get("value", ""),
-            "attachments": [],
-            "comments": []
+        page["attachments"] = processed_attachments
+        page["comments"] = [comment_format(c) for c in fetch_comments(session, confluence_url, page["id"])]
+        pages_out.append(page)
 
-
-        })
-    
     output = {
-            "filter": {"label": label, "title": title},
-            "total_pages": len(pages_out),
-            "pages": pages_out
-        }
-    
-    print("Fetch complete")
+        "filter": {"label": label, "title": title},
+        "total_pages": len(pages_out),
+        "pages": pages_out,
+    }
 
+    print("Fetch complete")
     return output
 
 

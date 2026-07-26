@@ -65,9 +65,27 @@ if "chat_histories" not in st.session_state:
 if "last_user_id" not in st.session_state:
     st.session_state.last_user_id = "demo-user"
 
+if "active_session_id" not in st.session_state:
+    st.session_state.active_session_id = None
+
+if "available_sessions" not in st.session_state:
+    st.session_state.available_sessions = {}
+
 
 def get_history(user_id: str):
     return st.session_state.chat_histories.setdefault(user_id, [])
+
+
+def refresh_sessions(user_id: str):
+    try:
+        response = requests.get(f"{BACKEND_URL}/sessions/{user_id}", timeout=10)
+        if response.ok:
+            sessions = response.json()
+            st.session_state.available_sessions[user_id] = [item.get("session_id") for item in sessions if item.get("session_id")]
+        else:
+            st.session_state.available_sessions[user_id] = []
+    except requests.RequestException:
+        st.session_state.available_sessions[user_id] = []
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +96,20 @@ with st.sidebar:
 
     user_id = st.text_input("User ID", value=st.session_state.last_user_id)
     st.session_state.last_user_id = user_id
+
+    refresh_sessions(user_id)
+
+    session_options = ["New session"] + list(st.session_state.available_sessions.get(user_id, []))
+    selected_session = st.selectbox(
+        "Conversation session",
+        options=session_options,
+        index=0 if st.session_state.active_session_id is None else session_options.index(st.session_state.active_session_id) if st.session_state.active_session_id in session_options else 0,
+    )
+
+    if selected_session != "New session":
+        st.session_state.active_session_id = selected_session
+    else:
+        st.session_state.active_session_id = None
 
     with st.expander("Confluence credentials", expanded=True):
         api_key = st.text_input("API Token", type="password")
@@ -198,14 +230,21 @@ if query:
             st.write(query)
             st.caption(now)
 
-    payload = {"user_id": user_id, "query": query}
+    payload = {"user_id": user_id, "query": query, "session_id": st.session_state.active_session_id}
     with chat_container:
         with st.chat_message("assistant"):
             with st.spinner("Searching knowledge base..."):
                 try:
                     response = requests.post(f"{BACKEND_URL}/chat", json=payload, timeout=120)
                     if response.ok:
-                        answer = response.json().get("answer", "")
+                        payload_response = response.json()
+                        answer = payload_response.get("answer", "")
+                        session_id = payload_response.get("session_id")
+                        if session_id:
+                            st.session_state.active_session_id = session_id
+                            existing_sessions = st.session_state.available_sessions.setdefault(user_id, [])
+                            if session_id not in existing_sessions:
+                                existing_sessions.append(session_id)
                     else:
                         answer = f"⚠️ Request failed: {response.text}"
                 except requests.RequestException as exc:

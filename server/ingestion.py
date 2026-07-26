@@ -1,16 +1,11 @@
 # Import pipeline components
-import os
-
 from pipeline.fetch_data import fetch_data
 from pipeline.validate import validate_data
 from pipeline.cleaner import clean_data
 from pipeline.chunker import chunk_data
 from pipeline.embedder import embed_data
 from pipeline.chroma_upsert import upsert_data
-
-
-def embedding_collection_suffix() -> str:
-    return "nvidia_e5_v5"
+from server.config import embedding_collection_suffix
 
 
 def run_pipeline(

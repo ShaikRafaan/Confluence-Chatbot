@@ -4,7 +4,6 @@ python-docx
 pydantic
 beautifulsoup4
 langchain-text-splitters
-sentence-transformers
 openai
 chromadb
 fastapi
