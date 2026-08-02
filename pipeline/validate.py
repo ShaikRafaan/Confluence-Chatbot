@@ -70,6 +70,13 @@ class Page(BaseModel):
             raise ValueError("Page title cannot be empty")
         return value
 
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: Optional[str]) -> str:
+        if value is None:
+            return ""
+        return value.strip()
+
 class ConfluenceExport(BaseModel):
     model_config = ConfigDict(extra="forbid")
     
