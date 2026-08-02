@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 
@@ -8,6 +8,7 @@ class Message(BaseModel):
     role: str  # "user" or "assistant"
     content: str
     timestamp: str  # ISO 8601 format
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ChatSession(BaseModel):
