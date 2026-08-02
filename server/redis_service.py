@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 from server.redis_client import get_redis_client, is_redis_available
 from server.models import Message, SessionMetadata
@@ -79,7 +79,8 @@ async def save_message(
     session_id: str,
     user_id: str,
     role: str,
-    content: str
+    content: str,
+    sources: Optional[List[Dict[str, Any]]] = None
 ) -> bool:
     """Save a message to a session."""
     if not is_redis_available():
@@ -90,7 +91,7 @@ async def save_message(
         redis = _get_redis()
         now = datetime.utcnow().isoformat() + "Z"
         
-        message = Message(role=role, content=content, timestamp=now)
+        message = Message(role=role, content=content, timestamp=now, sources=sources or [])
         session_key = SESSION_KEY.format(session_id=session_id)
         
         # Add message to session list
