@@ -164,32 +164,7 @@ def fetch_filtered(session, confluence_url, label=None, title=None):
             ]
         ]
 
-    # Format pages for downstream embedding pipeline
-    pages_out = []
-    for raw in pages:
-        pages_out.append({
-            "id": raw["id"],
-            "title": raw["title"],
-            "status": raw.get("status"),
-            "created_by": raw.get("history", {}).get("createdBy", {}).get("displayName"),
-            "updated_at": raw.get("version", {}).get("when"),
-            "updated_by": raw.get("version", {}).get("by", {}).get("displayName"),
-            "version_number": raw.get("version", {}).get("number"),
-            "labels": [
-                l["name"]
-                for l in raw.get("metadata", {}).get("labels", {}).get("results", [])
-            ],
-            "ancestors": [
-                {"id": a["id"], "title": a["title"]}
-                for a in raw.get("ancestors", [])
-            ],
-            "url": raw.get("_links", {}).get("webui", ""),
-            "body_storage": raw.get("body", {}).get("storage", {}).get("value", ""),
-            "attachments": [],
-            "comments": []
-        })
-
-    return pages_out
+    return pages
     
 #Fetch all pages when title or label is not provided
 def fetch_all(session: requests.Session, confluence_url: str) -> List[Dict]:
@@ -329,30 +304,51 @@ def process_attachment(session: requests.Session, confluence_url: str,page_id: s
     return att
 
 
+def construct_page_url(raw: Dict, confluence_url: str = "") -> str:
+    links = raw.get("_links", {})
+    webui = links.get("webui", "")
+    base_link = links.get("base", "")
+    if not webui:
+        return ""
+    if webui.startswith("http://") or webui.startswith("https://"):
+        return webui
+    if base_link:
+        return f"{base_link.rstrip('/')}/{webui.lstrip('/')}"
+    if confluence_url:
+        return f"{confluence_url.rstrip('/')}/{webui.lstrip('/')}"
+    return webui
+
 #Output format
 
 #Formats Output for pages
-def page_format(raw: Dict) -> Dict:
+def page_format(raw: Dict, confluence_url: str = "") -> Dict:
     version = raw.get("version",{})
     history = raw.get("history",{})
-    labels = [l["name"] for l in raw.get("metadata",{}).get("labels",{}).get("results",[])]
-    ancestors=[{"id": a["id"],"title": a["title"]} for a in raw.get("ancestors",[])]
+    labels = raw.get("labels") if "labels" in raw and isinstance(raw["labels"], list) else [
+        l["name"] for l in raw.get("metadata",{}).get("labels",{}).get("results",[])
+    ]
+    ancestors = raw.get("ancestors",[])
+    formatted_ancestors = [
+        {"id": a["id"], "title": a["title"]} for a in ancestors if isinstance(a, dict) and "id" in a and "title" in a
+    ]
+
+    body_content = raw.get("body_storage") or raw.get("body",{}).get("storage",{}).get("value","")
 
     return{
         "id": raw["id"],
         "title": raw["title"],
         "status": raw.get("status"),
-        "created_at": history.get("createdDate"),
-        "created_by": history.get("createdBy",{}).get("displayName"),
-        "updated_at": version.get("when"),
-        "updated_by": version.get("by",{}).get("displayName"),
-        "version_number":version.get("number"),
+        "created_at": history.get("createdDate") or raw.get("created_at"),
+        "created_by": history.get("createdBy",{}).get("displayName") or raw.get("created_by"),
+        "updated_at": version.get("when") or raw.get("updated_at"),
+        "updated_by": version.get("by",{}).get("displayName") or raw.get("updated_by"),
+        "version_number": version.get("number") or raw.get("version_number"),
         "labels": labels,
-        "ancestors":ancestors,
-        "url": raw.get("_links",{}).get("webui",""),
-        "body_storage": raw.get("body",{}).get("storage",{}).get("value",""),
-        "attachments":[],
-        "comments":[],
+        "ancestors": formatted_ancestors,
+        "url": construct_page_url(raw, confluence_url) if "_links" in raw else raw.get("url",""),
+        "body_storage": body_content,
+        "attachments": raw.get("attachments", []),
+        "comments": raw.get("comments", []),
     }
 
 #Formats output for attachments
@@ -416,7 +412,7 @@ def fetch_data(api_key: str, user: str, confluence_url: Optional[str] = None, la
     pages_out = []
 
     for raw in all_pages_raw:
-        page = page_format(raw)
+        page = page_format(raw, confluence_url)
         raw_attachments = fetch_attachments(session, confluence_url, page["id"])
         processed_attachments = []
 
