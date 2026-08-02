@@ -1,4 +1,5 @@
 import os
+import html
 import json
 import time
 from datetime import datetime
@@ -59,10 +60,10 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# Session state
+# Session state initialisation
 # ---------------------------------------------------------------------------
 if "chat_histories" not in st.session_state:
-    st.session_state.chat_histories = {}  # user_id -> list[dict(role, content, ts)]
+    st.session_state.chat_histories = {}
 
 if "last_user_id" not in st.session_state:
     st.session_state.last_user_id = "demo-user"
@@ -73,33 +74,88 @@ if "active_session_id" not in st.session_state:
 if "available_sessions" not in st.session_state:
     st.session_state.available_sessions = {}
 
+if "ingestion_status" not in st.session_state:
+    st.session_state.ingestion_status = {}
+
 
 def get_history(user_id: str):
     return st.session_state.chat_histories.setdefault(user_id, [])
 
 
 def refresh_sessions(user_id: str):
+    """Fetch known sessions from backend and merge with locally-known IDs."""
     try:
         response = requests.get(f"{BACKEND_URL}/sessions/{user_id}", timeout=10)
         if response.ok:
             sessions = response.json()
-            st.session_state.available_sessions[user_id] = [item.get("session_id") for item in sessions if item.get("session_id")]
+            remote_ids = [
+                item.get("session_id")
+                for item in sessions
+                if item.get("session_id")
+            ]
         else:
-            st.session_state.available_sessions[user_id] = []
+            remote_ids = []
     except requests.RequestException:
-        st.session_state.available_sessions[user_id] = []
+        remote_ids = []
+
+    # Merge: keep any locally-known active session even if not yet on the server
+    existing = st.session_state.available_sessions.get(user_id, [])
+    merged = list(dict.fromkeys(remote_ids + existing))  # dedupe, remote first
+    st.session_state.available_sessions[user_id] = merged
 
 
-def render_sources(sources):
+def load_session_history(user_id: str, session_id: str):
+    """Fetch full message history from backend for a session."""
+    try:
+        resp = requests.get(
+            f"{BACKEND_URL}/sessions/{user_id}/{session_id}", timeout=10
+        )
+        if resp.ok:
+            data = resp.json()
+            msgs = data.get("messages", [])
+            st.session_state.chat_histories[user_id] = [
+                {
+                    "role": m.get("role"),
+                    "content": m.get("content"),
+                    "sources": m.get("sources", []),
+                    "ts": m.get("timestamp", ""),
+                }
+                for m in msgs
+            ]
+    except requests.RequestException:
+        pass
+
+
+def source_href(src, confluence_base_url=""):
+    url = (src.get("url") or "").strip()
+    base_url = (confluence_base_url or "").strip().rstrip("/")
+
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+
+    if url and base_url:
+        return f"{base_url}/{url.lstrip('/')}"
+
+    page_id = str(src.get("page_id") or "").strip()
+    if page_id and base_url:
+        return f"{base_url}/pages/{page_id}"
+
+    return url
+
+
+def render_sources(sources, confluence_base_url=""):
     if not sources:
         return
 
     st.markdown("**Sources:**")
     for src in sources:
-        title = src.get("title", "Confluence Page")
-        url = src.get("url", "")
+        title = html.escape(src.get("title", "Confluence Page"))
+        url = html.escape(source_href(src, confluence_base_url), quote=True)
         if url:
-            st.markdown(f"- <a href='{url}' target='_blank'>{title}</a>", unsafe_allow_html=True)
+            st.markdown(
+                f'- <a href="{url}" target="_blank" rel="noopener noreferrer">{title}</a>',
+                unsafe_allow_html=True,
+            )
         else:
             st.markdown(f"- {title}")
 
@@ -123,6 +179,8 @@ def stream_chat_response(payload, metadata, status_slot=None):
                 metadata["status"] = event.get("message", "")
                 if status_slot is not None:
                     status_slot.caption(metadata["status"])
+            elif event_type == "session":
+                metadata["session_id"] = event.get("session_id")
             elif event_type == "token":
                 yield event.get("text", "")
             elif event_type == "metadata":
@@ -130,7 +188,9 @@ def stream_chat_response(payload, metadata, status_slot=None):
                 metadata["sources"] = event.get("sources", [])
             elif event_type == "error":
                 metadata["session_id"] = event.get("session_id")
-                raise RuntimeError(event.get("message", "Streaming response failed"))
+                raise RuntimeError(
+                    event.get("message", "Streaming response failed")
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -144,39 +204,49 @@ with st.sidebar:
 
     refresh_sessions(user_id)
 
-    stored_sessions = list(st.session_state.available_sessions.get(user_id, []))
-    if st.session_state.active_session_id and st.session_state.active_session_id not in stored_sessions:
+    # ---- session selector ----
+    stored_sessions = list(
+        st.session_state.available_sessions.get(user_id, [])
+    )
+    # Ensure the active session always appears in the dropdown
+    if (
+        st.session_state.active_session_id
+        and st.session_state.active_session_id not in stored_sessions
+    ):
         stored_sessions.insert(0, st.session_state.active_session_id)
 
     session_options = ["New session"] + stored_sessions
+
+    # Compute default index from active_session_id
+    if st.session_state.active_session_id in session_options:
+        default_idx = session_options.index(st.session_state.active_session_id)
+    else:
+        default_idx = 0
+
     selected_session = st.selectbox(
         "Conversation session",
         options=session_options,
-        index=0 if st.session_state.active_session_id is None else session_options.index(st.session_state.active_session_id) if st.session_state.active_session_id in session_options else 0,
+        index=default_idx,
     )
 
-    if selected_session != "New session":
-        if st.session_state.active_session_id != selected_session:
-            st.session_state.active_session_id = selected_session
-            try:
-                resp = requests.get(f"{BACKEND_URL}/sessions/{user_id}/{selected_session}", timeout=10)
-                if resp.ok:
-                    data = resp.json()
-                    msgs = data.get("messages", [])
-                    st.session_state.chat_histories[user_id] = [
-                        {
-                            "role": m.get("role"),
-                            "content": m.get("content"),
-                            "sources": m.get("sources", []),
-                            "ts": m.get("timestamp", "")
-                        } for m in msgs
-                    ]
-            except requests.RequestException:
-                pass
-    else:
+    # React to user *changing* the dropdown
+    if selected_session == "New session":
         if st.session_state.active_session_id is not None:
+            # User explicitly chose "New session"
             st.session_state.active_session_id = None
             st.session_state.chat_histories[user_id] = []
+            st.rerun()
+    else:
+        if st.session_state.active_session_id != selected_session:
+            # User switched to a different existing session
+            st.session_state.active_session_id = selected_session
+            load_session_history(user_id, selected_session)
+            st.rerun()
+
+    if st.button("➕ Start new session", use_container_width=True):
+        st.session_state.active_session_id = None
+        st.session_state.chat_histories[user_id] = []
+        st.rerun()
 
     with st.expander("Confluence credentials", expanded=True):
         api_key = st.text_input("API Token", type="password")
@@ -188,9 +258,6 @@ with st.sidebar:
     with st.expander("Scope filters (optional)"):
         label = st.text_input("Label")
         title = st.text_input("Title")
-
-    if "ingestion_status" not in st.session_state:
-        st.session_state.ingestion_status = {}  # user_id -> dict(state, message, ts)
 
     current_ingestion = st.session_state.ingestion_status.get(user_id, {})
     ingestion_in_progress = current_ingestion.get("state") == "running"
@@ -213,7 +280,9 @@ with st.sidebar:
             "title": title or None,
         }
         try:
-            response = requests.post(f"{BACKEND_URL}/ingest", json=payload, timeout=15)
+            response = requests.post(
+                f"{BACKEND_URL}/ingest", json=payload, timeout=15
+            )
             if response.ok:
                 data = response.json()
                 st.session_state.ingestion_status[user_id] = {
@@ -242,13 +311,17 @@ with st.sidebar:
         job_id = last_status.get("job_id")
         if last_status["state"] == "running" and job_id:
             try:
-                response = requests.get(f"{BACKEND_URL}/ingest/status/{job_id}", timeout=10)
+                response = requests.get(
+                    f"{BACKEND_URL}/ingest/status/{job_id}", timeout=10
+                )
                 response.raise_for_status()
                 job = response.json()
                 total = job.get("total_items") or 1
                 processed = job.get("processed_items") or 0
                 progress = min(processed / total, 1.0)
-                stage = str(job.get("stage", "running")).replace("_", " ").title()
+                stage = (
+                    str(job.get("stage", "running")).replace("_", " ").title()
+                )
 
                 with status_placeholder.container():
                     st.progress(progress, text=f"{stage} - {processed}/{total}")
@@ -276,7 +349,9 @@ with st.sidebar:
                         time.sleep(1.5)
                         st.rerun()
             except requests.RequestException as exc:
-                status_placeholder.error(f"Could not read ingestion status: {exc}")
+                status_placeholder.error(
+                    f"Could not read ingestion status: {exc}"
+                )
         elif last_status["state"] == "success":
             status_placeholder.success(f"{last_status['message']} ({ts})")
         elif last_status["state"] == "error":
@@ -285,7 +360,11 @@ with st.sidebar:
     st.divider()
     history = get_history(user_id)
     st.caption(f"💬 {len(history)} messages in this user's history")
-    if st.button("🗑️ Clear chat history", use_container_width=True, disabled=not history):
+    if st.button(
+        "🗑️ Clear chat history",
+        use_container_width=True,
+        disabled=not history,
+    ):
         st.session_state.chat_histories[user_id] = []
         st.rerun()
 
@@ -301,7 +380,7 @@ with chat_container:
     for msg in history:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
-            render_sources(msg.get("sources"))
+            render_sources(msg.get("sources"), confluence_url)
             if msg.get("ts"):
                 st.caption(msg["ts"])
 
@@ -315,30 +394,52 @@ if query:
             st.write(query)
             st.caption(now)
 
-    payload = {"user_id": user_id, "query": query, "session_id": st.session_state.active_session_id}
+    # Always pass the current active_session_id so the backend reuses it
+    payload = {
+        "user_id": user_id,
+        "query": query,
+        "session_id": st.session_state.active_session_id,
+    }
     sources = []
     with chat_container:
         with st.chat_message("assistant"):
-            metadata = {"sources": [], "session_id": None, "status": "Searching knowledge base..."}
-            status_placeholder = st.empty()
-            status_placeholder.caption(metadata["status"])
+            metadata = {
+                "sources": [],
+                "session_id": None,
+                "status": "Searching knowledge base...",
+            }
+            status_slot = st.empty()
+            status_slot.caption(metadata["status"])
             try:
-                answer = st.write_stream(stream_chat_response(payload, metadata, status_placeholder))
-                status_placeholder.empty()
+                answer = st.write_stream(
+                    stream_chat_response(payload, metadata, status_slot)
+                )
+                status_slot.empty()
                 sources = metadata.get("sources", [])
-                session_id = metadata.get("session_id")
-                if session_id:
-                    st.session_state.active_session_id = session_id
-                    existing_sessions = st.session_state.available_sessions.setdefault(user_id, [])
-                    if session_id not in existing_sessions:
-                        existing_sessions.append(session_id)
-            except (requests.RequestException, RuntimeError, json.JSONDecodeError) as exc:
-                status_placeholder.empty()
+            except (
+                requests.RequestException,
+                RuntimeError,
+                json.JSONDecodeError,
+            ) as exc:
+                status_slot.empty()
                 answer = f"⚠️ Could not stream response: {exc}"
                 st.write(answer)
 
-            render_sources(sources)
+            # Persist the session_id returned by the backend
+            session_id = metadata.get("session_id")
+            if session_id:
+                st.session_state.active_session_id = session_id
+                # Immediately register so the selector doesn't lose it on rerun
+                existing = st.session_state.available_sessions.setdefault(
+                    user_id, []
+                )
+                if session_id not in existing:
+                    existing.insert(0, session_id)
+
+            render_sources(sources, confluence_url)
             ts = datetime.now().strftime("%H:%M:%S")
             st.caption(ts)
 
-    history.append({"role": "assistant", "content": answer, "sources": sources, "ts": ts})
+    history.append(
+        {"role": "assistant", "content": answer, "sources": sources, "ts": ts}
+    )
