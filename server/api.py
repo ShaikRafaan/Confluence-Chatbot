@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from typing import Optional, List
 from server.ingestion import run_pipeline
 from server.config import EMBED_MODEL, LLM_MODEL, embedding_collection_suffix, get_nvidia_client
-from server.ingest_jobs import create_ingest_job, get_ingest_job, get_running_job
+from server.ingest_jobs import create_ingest_job, get_ingest_job, get_running_job, clear_user_running_job
 from server.redis_service import (
     create_new_session,
     save_message,
@@ -21,6 +21,7 @@ from server.redis_service import (
     update_session_accessed
 )
 from server.models import SessionMetadata, ClearHistoryRequest
+
 load_dotenv()
 
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
@@ -42,7 +43,7 @@ app.add_middleware(
 
 from server.prompts import SYSTEM_PROMPT, CONDENSE_QUERY_PROMPT, build_rag_prompt
 
-#Models
+# Models
 
 class SourceItem(BaseModel):
     title: str
@@ -68,8 +69,9 @@ class IngestRequest(BaseModel):
     confluence_url: str
     label: Optional[str] = None
     title: Optional[str] = None
+    force: Optional[bool] = False
 
-#Helper Functions
+# Helper Functions
 
 def _first_non_latin1(value: str):
     for char in value:
@@ -265,7 +267,7 @@ def rag_pipeline(user_id: str, query: str, history: list = None):
     return answer, sources
 
 
-#API Endpoints
+# API Endpoints
 
 @app.get("/")
 def root():
@@ -413,26 +415,30 @@ def ingest(req: IngestRequest, background_tasks: BackgroundTasks):
     validate_ingest_request(req)
 
     normalized_user_id = req.user_id.strip()
-    running_job = get_running_job(normalized_user_id)
-    if running_job and running_job.get("status") == "running":
-        return {
-            "message": "Ingestion already running",
-            "user_id": normalized_user_id,
-            "job_id": running_job["job_id"],
-        }
+
+    if req.force:
+        clear_user_running_job(normalized_user_id)
+    else:
+        running_job = get_running_job(normalized_user_id)
+        if running_job and running_job.get("status") == "running":
+            return {
+                "message": "Ingestion already running",
+                "user_id": normalized_user_id,
+                "job_id": running_job["job_id"],
+            }
 
     job = create_ingest_job(normalized_user_id)
     
     background_tasks.add_task(
-            run_pipeline,
-            user_id=normalized_user_id,
-            api_key=req.api_key.strip(),
-            user_email=req.user_email.strip(),
-            confluence_url=req.confluence_url.strip(),
-            label=req.label.strip() if req.label else None,
-            title=req.title.strip() if req.title else None,
-            job_id=job["job_id"],
-        )
+        run_pipeline,
+        user_id=normalized_user_id,
+        api_key=req.api_key.strip(),
+        user_email=req.user_email.strip(),
+        confluence_url=req.confluence_url.strip(),
+        label=req.label.strip() if req.label else None,
+        title=req.title.strip() if req.title else None,
+        job_id=job["job_id"],
+    )
     return {"message": "Ingestion started", "user_id": normalized_user_id, "job_id": job["job_id"]}
 
 

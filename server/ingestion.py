@@ -6,6 +6,7 @@ from pipeline.chunker import chunk_data
 from pipeline.embedder import embed_data
 from pipeline.chroma_upsert import upsert_data
 from server.config import embedding_collection_suffix
+from server.ingest_jobs import update_ingest_job
 
 
 def run_pipeline(
@@ -14,12 +15,23 @@ def run_pipeline(
     user_email: str,
     confluence_url: str,
     label: str = None,
-    title: str = None
+    title: str = None,
+    job_id: str = None
 ):
 
     try:
-        print(f"Starting ingestion for user: {user_id}")
+        print(f"Starting ingestion for user: {user_id} (job_id: {job_id})")
+        if job_id:
+            update_ingest_job(job_id, stage="fetching_data", processed_items=1, total_items=6)
+
         print("Fetching data...")
+        if job_id:
+            update_ingest_job(
+                job_id,
+                stage="Fetching pages & attachments from Confluence...",
+                processed_items=1,
+                total_items=6
+            )
 
         raw_data = fetch_data(
             api_key=api_key,
@@ -30,14 +42,28 @@ def run_pipeline(
         )
 
         if not raw_data:
-            raise Exception("No data fetched")
+            raise Exception("No data fetched from Confluence. Check credentials or scope filters.")
+
+        total_pages = raw_data.get("total_pages", 0) if isinstance(raw_data, dict) else 0
+
+        if job_id:
+            update_ingest_job(
+                job_id,
+                stage=f"Validating {total_pages} fetched pages...",
+                processed_items=2
+            )
 
         print("Validating data...")
-
         validated_data = validate_data(raw_data)
 
-        print("Cleaning data...")
+        if job_id:
+            update_ingest_job(
+                job_id,
+                stage="Cleaning HTML & extracting content...",
+                processed_items=3
+            )
 
+        print("Cleaning data...")
         clean_docs = clean_data(validated_data)
 
         if not clean_docs:
@@ -45,8 +71,14 @@ def run_pipeline(
 
         print(f"Clean documents: {len(clean_docs)}")
 
-        print("Chunking documents...")
+        if job_id:
+            update_ingest_job(
+                job_id,
+                stage=f"Chunking {len(clean_docs)} documents...",
+                processed_items=4
+            )
 
+        print("Chunking documents...")
         chunks = chunk_data(
             clean_documents=clean_docs,
             user_id=user_id
@@ -56,8 +88,15 @@ def run_pipeline(
             raise Exception("No chunks produced")
 
         print(f"Total chunks: {len(chunks)}")
-        print("Generating embeddings...")
 
+        if job_id:
+            update_ingest_job(
+                job_id,
+                stage=f"Generating embeddings for {len(chunks)} chunks...",
+                processed_items=5
+            )
+
+        print("Generating embeddings...")
         vectors = embed_data(chunks)
 
         if not vectors:
@@ -65,6 +104,12 @@ def run_pipeline(
 
         print(f"Total embeddings: {len(vectors)}")
 
+        if job_id:
+            update_ingest_job(
+                job_id,
+                stage=f"Storing {len(vectors)} vectors in database...",
+                processed_items=6
+            )
 
         collection_name = f"user_{user_id}_{embedding_collection_suffix()}"
         print(f"Storing in collection: {collection_name}")
@@ -77,5 +122,22 @@ def run_pipeline(
         print(f"Stored {result['vector_count']} vectors")
         print(f"✅ Ingestion completed for user: {user_id}")
 
+        if job_id:
+            update_ingest_job(
+                job_id,
+                status="complete",
+                stage="complete",
+                processed_items=6,
+                total_items=6
+            )
+
     except Exception as e:
-        print(f"\n❌ Pipeline failed for user {user_id}: {e}")
+        error_msg = str(e)
+        print(f"\n❌ Pipeline failed for user {user_id}: {error_msg}")
+        if job_id:
+            update_ingest_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                error=error_msg
+            )

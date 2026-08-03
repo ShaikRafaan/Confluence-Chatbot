@@ -200,9 +200,16 @@ with st.sidebar:
     st.header("⚙️ Ingestion Settings")
 
     user_id = st.text_input("User ID", value=st.session_state.last_user_id)
-    st.session_state.last_user_id = user_id
-
-    refresh_sessions(user_id)
+    
+    # Refresh sessions only when user_id changes or on initial load
+    if (
+        st.session_state.last_user_id != user_id
+        or "sessions_fetched_user_id" not in st.session_state
+        or st.session_state.sessions_fetched_user_id != user_id
+    ):
+        st.session_state.last_user_id = user_id
+        refresh_sessions(user_id)
+        st.session_state.sessions_fetched_user_id = user_id
 
     # ---- session selector ----
     stored_sessions = list(
@@ -223,11 +230,19 @@ with st.sidebar:
     else:
         default_idx = 0
 
-    selected_session = st.selectbox(
-        "Conversation session",
-        options=session_options,
-        index=default_idx,
-    )
+    col_sel, col_ref = st.columns([4, 1])
+    with col_sel:
+        selected_session = st.selectbox(
+            "Conversation session",
+            options=session_options,
+            index=default_idx,
+            label_visibility="visible",
+        )
+    with col_ref:
+        st.write("") # spacing alignment
+        if st.button("🔄", help="Refresh available sessions from server"):
+            refresh_sessions(user_id)
+            st.rerun()
 
     # React to user *changing* the dropdown
     if selected_session == "New session":
@@ -278,6 +293,7 @@ with st.sidebar:
             "confluence_url": confluence_url,
             "label": label or None,
             "title": title or None,
+            "force": True,
         }
         try:
             response = requests.post(
@@ -312,7 +328,7 @@ with st.sidebar:
         if last_status["state"] == "running" and job_id:
             try:
                 response = requests.get(
-                    f"{BACKEND_URL}/ingest/status/{job_id}", timeout=10
+                    f"{BACKEND_URL}/ingest/status/{job_id}", timeout=30
                 )
                 response.raise_for_status()
                 job = response.json()
@@ -346,12 +362,13 @@ with st.sidebar:
                             "ts": datetime.now().strftime("%H:%M:%S"),
                         }
                     else:
-                        time.sleep(1.5)
+                        time.sleep(3.0)
                         st.rerun()
             except requests.RequestException as exc:
-                status_placeholder.error(
-                    f"Could not read ingestion status: {exc}"
-                )
+                with status_placeholder.container():
+                    st.warning(f"Status check delayed (retrying...): {exc}")
+                time.sleep(2.0)
+                st.rerun()
         elif last_status["state"] == "success":
             status_placeholder.success(f"{last_status['message']} ({ts})")
         elif last_status["state"] == "error":

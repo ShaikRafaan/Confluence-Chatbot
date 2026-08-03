@@ -75,16 +75,19 @@ def build_clean_doc(page: dict) -> dict:
         "source_metadata":{
             "status": page.get("status"),
             "labels": page.get("labels"),
-            "updated_at": page.get("updated-at"),
+            "updated_at": page.get("updated_at") or page.get("updated-at"),
             "version_number":page.get("version_number")
         }
     }
 
 def clean_data(raw_data: Dict) -> List[Dict]:
-    validate = ConfluenceExport.model_validate(raw_data)
-    pages = validate.model_dump(mode="json")["pages"]
+    if isinstance(raw_data, dict) and "pages" in raw_data:
+        pages = raw_data["pages"]
+    else:
+        validate = ConfluenceExport.model_validate(raw_data)
+        pages = validate.model_dump(mode="json")["pages"]
 
-    clean_documents=[]
+    clean_documents = []
 
     for page in pages:
         clean_doc = build_clean_doc(page)

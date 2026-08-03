@@ -9,23 +9,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-API_KEY = os.getenv("NVIDIA_API_KEY")
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 MODEL_NAME = "nvidia/nv-embedqa-e5-v5"
 MAX_RETRIES = 4
 MAX_TOKENS = 8192
-
-
-def _sanitize_text(text: str) -> str:
-    """Strip control characters and zero-width Unicode that can cause NVIDIA API 500s."""
-    # Remove zero-width chars and other invisible Unicode
-    text = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\ufeff\u00ad]', '', text)
-    # Remove ASCII control characters (keep newlines and tabs)
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
-    return text.strip()
-
-if not API_KEY:
-    raise RuntimeError("NVIDIA_API_KEY is not set")
 
 client = None
 
@@ -33,11 +20,21 @@ client = None
 def _get_nvidia_client():
     global client
     if client is None:
+        api_key = os.getenv("NVIDIA_API_KEY")
+        if not api_key:
+            raise RuntimeError("NVIDIA_API_KEY is not set")
         client = OpenAI(
             base_url=BASE_URL,
-            api_key=API_KEY
+            api_key=api_key
         )
     return client
+def _sanitize_text(text: str) -> str:
+    """Strip control characters and zero-width Unicode that can cause NVIDIA API 500s."""
+    # Remove zero-width chars and other invisible Unicode
+    text = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\ufeff\u00ad]', '', text)
+    # Remove ASCII control characters (keep newlines and tabs)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    return text.strip()
 
 
 def _request_embeddings(texts: List[str]) -> List[List[float]]:

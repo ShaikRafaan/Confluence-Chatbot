@@ -62,6 +62,25 @@ def get_running_job(user_id: str) -> Optional[Dict[str, Any]]:
     return get_ingest_job(job_id) if job_id else None
 
 
+def clear_user_running_job(user_id: str):
+    """Force clear any running job lock for a user."""
+    redis = _redis()
+    if redis:
+        user_key = USER_RUNNING_JOB_KEY.format(user_id=user_id)
+        job_id = redis.get(user_key)
+        if job_id:
+            if isinstance(job_id, bytes):
+                job_id = job_id.decode("utf-8")
+            raw = redis.get(_job_key(job_id))
+            if raw:
+                job = json.loads(raw)
+                job["status"] = "failed"
+                job["stage"] = "cancelled"
+                redis.set(_job_key(job_id), json.dumps(job), ex=JOB_TTL_SECONDS)
+            redis.delete(user_key)
+    _memory_running_jobs.pop(user_id, None)
+
+
 def get_ingest_job(job_id: str) -> Optional[Dict[str, Any]]:
     if not job_id:
         return None
@@ -78,22 +97,27 @@ def get_ingest_job(job_id: str) -> Optional[Dict[str, Any]]:
         job = _memory_jobs.get(job_id)
 
     if job and job.get("status") == "running":
-        started_at = datetime.fromisoformat(job["started_at"].replace("Z", "+00:00")).replace(tzinfo=None)
-        if datetime.utcnow() - started_at > timedelta(hours=6):
-            job["status"] = "failed"
-            job["stage"] = "stale"
-            job.setdefault("errors", []).append({
-                "message": "Ingestion timed out or the server restarted.",
-                "timestamp": _now(),
-            })
-            job["updated_at"] = _now()
-            redis = _redis()
-            if redis:
-                redis.set(_job_key(job_id), json.dumps(job), ex=JOB_TTL_SECONDS)
-                redis.delete(USER_RUNNING_JOB_KEY.format(user_id=job["user_id"]))
-            else:
-                _memory_jobs[job_id] = job
-                _memory_running_jobs.pop(job["user_id"], None)
+        # Check if the job has been inactive for more than 3 minutes
+        updated_at_str = job.get("updated_at") or job.get("started_at")
+        try:
+            updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00")).replace(tzinfo=None)
+            if datetime.utcnow() - updated_at > timedelta(minutes=3):
+                job["status"] = "failed"
+                job["stage"] = "stale"
+                job.setdefault("errors", []).append({
+                    "message": "Ingestion timed out or became inactive.",
+                    "timestamp": _now(),
+                })
+                job["updated_at"] = _now()
+                redis = _redis()
+                if redis:
+                    redis.set(_job_key(job_id), json.dumps(job), ex=JOB_TTL_SECONDS)
+                    redis.delete(USER_RUNNING_JOB_KEY.format(user_id=job["user_id"]))
+                else:
+                    _memory_jobs[job_id] = job
+                    _memory_running_jobs.pop(job["user_id"], None)
+        except Exception:
+            pass
 
     return job
 

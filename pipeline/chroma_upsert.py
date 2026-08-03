@@ -1,13 +1,20 @@
 import json
 import chromadb
-from typing import List,Dict
+from typing import List, Dict
 
-client= chromadb.PersistentClient(path="./chroma_db")
+_client = None
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = chromadb.PersistentClient(path="./chroma_db")
+    return _client
 
 
 def upsert_data(vectors: List[Dict], collection_name: str):
     
-    collection = client.get_or_create_collection(name= collection_name)
+    collection = _get_client().get_or_create_collection(name=collection_name)
     
     ids = []
     documents = []

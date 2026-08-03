@@ -6,19 +6,19 @@ import json
 
 
 class Filter(BaseModel):
-    model_config=ConfigDict(extra="forbid")
+    model_config=ConfigDict(extra="ignore")
 
     label: Optional[str] = None
     title: Optional[str] = None
 
 class Ancestor(BaseModel):
-    model_config=ConfigDict(extra="forbid")
+    model_config=ConfigDict(extra="ignore")
 
     id:str
     title:str
 
 class Attachment(BaseModel):
-    model_config=ConfigDict(extra="forbid")
+    model_config=ConfigDict(extra="ignore")
 
     id:str
     title:str
@@ -29,7 +29,7 @@ class Attachment(BaseModel):
     content: Optional[str] = None
 
 class Comment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     id: str
     created_at:Optional[datetime] = None
@@ -38,7 +38,7 @@ class Comment(BaseModel):
     body: Optional[str] = ""
 
 class Page(BaseModel):
-    model_config=ConfigDict(extra="allow")
+    model_config=ConfigDict(extra="ignore")
 
     id: str
     title: str
@@ -78,7 +78,7 @@ class Page(BaseModel):
         return value.strip()
 
 class ConfluenceExport(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     
     filter: Filter
     total_pages: int
